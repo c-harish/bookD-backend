@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request 
+from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, current_user, logout_user, login_required
@@ -8,15 +8,58 @@ from functools import wraps
 import jwt
 import pdfkit
 from flask_caching import Cache
+import csv
+from celery import Celery
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
+import os
 
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secretkennwort'
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///bookd5.db'
 app.config['TESTING'] = True
+
+app.config['CELERY_BACKEND'] = "redis://localhost:6379/"
+app.config['CELERY_BROKER_URL'] = "redis://localhost:6379/"
+app.config['CELERY_TIMEZONE'] = 'UTC'
+
+
+app.config['CELERYBEAT_SCHEDULE'] = {
+    'say-every-5-seconds': {
+        'task': 'return_something',
+        'schedule': timedelta(seconds=5)
+    },
+}
+
+
 app.config.from_object(__name__)
 cache = Cache(app, config={'CACHE_TYPE': 'redis'})
 
+def make_celery(app):
+    celery = Celery(app.import_name, backend=app.config['CELERY_BACKEND'],
+                    broker=app.config['CELERY_BROKER_URL'])
+    celery.conf.update(app.config)
+    TaskBase = celery.Task
+
+    class ContextTask(TaskBase):
+        abstract = True
+        def __call__(self, *args, **kwargs):
+            with app.app_context():
+                return TaskBase.__call__(self, *args, **kwargs)
+    celery.Task = ContextTask
+    return celery
+
+
+celery_app = make_celery(app)
+
+
+@celery_app.task(name='return_something')
+def return_something():
+    print ('something')
+    return 'something'
 
 db = SQLAlchemy(app)
 
@@ -380,10 +423,6 @@ def get_available_tickets_dict():
 	return output
 
 
-def export_pdf():
-	pdfkit.from_url('http://localhost:8080/user/bookings', 'out.pdf')
-
-
 @app.route('/venues/search', methods=['GET'])
 @token_required
 @cache.cached(timeout=1, query_string=True)
@@ -434,6 +473,117 @@ def search_shows(current_user):
 		return jsonify({'shows' : output})
 
 
+@app.route('/venue_bookings', methods = ['GET'])
+@token_required
+@cache.cached(timeout=1)
+def venue_bookings(current_user):
+	venues = Venues.query.filter_by().all()
+	venue_list = []
+	total_list = []
+	booked_list = []
+	booked_percent = []
+	for venue in venues:
+		venue_list.append(venue.venue_name)
+		total_list.append(venue.venue_capacity)
+		booked_tickets = 0
+		bookings = Bookings.query.filter_by(booking_venue_id = venue.venue_id).all()
+		for booking in bookings:
+			booked_tickets += booking.booking_tickets
+		booked_list.append(booked_tickets)
+		booked_percent.append(booked_tickets*100/venue.venue_capacity)
+	print(venue_list, total_list, booked_list, booked_percent)
+	return jsonify({'name_list' : venue_list, 'total_list' : total_list, 'booked_list' : booked_list, 'percent_list': booked_percent})
+
+
+@app.route('/show_bookings', methods = ['GET'])
+@token_required
+@cache.cached(timeout=1)
+def show_bookings(current_user):
+	venueid = request.args.get('venueid', None)
+	shows = Shows.query.filter_by(show_venue_id = venueid).all()
+	show_list = []
+	booked_list = []
+	for show in shows:
+		show_list.append(show.show_name)
+		booked_tickets = 0
+		bookings = Bookings.query.filter_by(booking_show_id = show.show_id).all()
+		for booking in bookings:
+			booked_tickets += booking.booking_tickets
+		booked_list.append(booked_tickets)
+	print(show_list, booked_list)
+	return jsonify({'name_list' : show_list, 'booked_list' : booked_list})
+
+@app.route('/get_csv', methods = ['GET'])
+@token_required
+def get_csv(current_user):
+	bookings = Bookings.query.filter_by(booking_userid = current_user.userid).all()
+	# bookings = Bookings.query.filter_by(booking_userid = uid).all()
+	field_names = ["No", "Show Name", "Time", "Tag", "Venue", "Location", "Price", "Tickets", "Rating"]
+	output_list = []
+	count = 0
+
+	for booking in bookings:
+		count += 1
+		output_dict = {}
+		output_dict['No'] = count
+		output_dict['Show Name'] = booking.booking_show_name
+		output_dict['Time'] = booking.booking_show_time
+		output_dict['Tag'] = booking.booking_show_tag
+		output_dict['Venue'] = booking.booking_venue_name
+		output_dict['Location'] = booking.booking_venue_location
+		output_dict['Price'] = booking.booking_price
+		output_dict['Tickets'] = booking.booking_tickets
+		output_dict['Rating'] = booking.booking_show_rating
+
+		output_list.append(output_dict)
+	
+	with open('user_bookings.csv', 'w') as csvfile:
+		writer = csv.DictWriter(csvfile, fieldnames = field_names)
+		writer.writeheader()
+		writer.writerows(output_list)
+	return send_file('user_bookings.csv', as_attachment=True)
+		
+
+def email_reminder(recepient):
+	password = "yaajuuhloxuifnbm"
+	username = "21f1007115@ds.study.iitm.ac.in"
+	receiver = ""
+	msg = MIMEMultipart()
+	msg['From'] = username
+	msg['To'] = recepient
+	msg['Subject'] = "Amazing Events Awaiting only for you."
+	msg.attach(MIMEText("We missed you in bookD. Now Book tickets for your favourite shows and events with 0 platform Fee. Enjoy!"))
+
+	with smtplib.SMTP('smtp.gmail.com', 587) as server:
+		server.starttls()
+		server.login(username, password)
+		server.sendmail(username, receiver, msg.as_string())
+
+
+def email_report(recepient):
+	password = "yaajuuhloxuifnbm"
+	username = "21f1007115@ds.study.iitm.ac.in"
+	receiver = "leniko5896@tiuas.com"
+	msg = MIMEMultipart()
+	msg['From'] = username
+	msg['To'] = recepient
+	msg['Subject'] = "Amazing Events Awaiting only for you."
+	msg.attach(MIMEText("We missed you in bookD. Now Book tickets for your favourite shows and events with 0 platform Fee. Enjoy!"))
+
+	with open(os.path.join(os.getcwd(), 'user_bookings.csv'), 'rb') as f:
+		attachment = MIMEApplication(f.read(), _subtype='csv')
+		attachment.add_header('Content-Disposition', 'attachment', filename='user_bookings.csv')
+		msg.attach(attachment)
+	
+	with smtplib.SMTP('smtp.gmail.com', 587) as server:
+		server.starttls()
+		server.login(username, password)
+		server.sendmail(username, receiver, msg.as_string())
+
+		
+
+
+
 	
 	
 
@@ -441,6 +591,7 @@ def search_shows(current_user):
 ## --------------------------------------------------------------###
 
 if __name__ == "__main__":
+	# email_report()
 	# with app.app_context():
 	#     db.create_all()
 	app.run(debug=True)
