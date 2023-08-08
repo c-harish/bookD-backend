@@ -10,11 +10,14 @@ import pdfkit
 from flask_caching import Cache
 import csv
 from celery import Celery
+from celery.schedules import crontab
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
-import os
+import os, time
+
+## --------------------------------------------------------------###
 
 
 app = Flask(__name__)
@@ -24,14 +27,18 @@ app.config['TESTING'] = True
 
 app.config['CELERY_BACKEND'] = "redis://localhost:6379/"
 app.config['CELERY_BROKER_URL'] = "redis://localhost:6379/"
-app.config['CELERY_TIMEZONE'] = 'UTC'
+app.config['CELERY_TIMEZONE'] = 'Asia/Kolkata'
 
 
 app.config['CELERYBEAT_SCHEDULE'] = {
-    'say-every-5-seconds': {
-        'task': 'return_something',
-        'schedule': timedelta(seconds=5)
-    },
+	'report-every-month': {
+		'task': 'email_report_schedule',
+		'schedule': crontab(minute=37, hour=11, day_of_month='8')
+	},
+	'remind-every-day': {
+		'task': 'email_remind_schedule',
+		'schedule': crontab(minute=37, hour=11)
+	}
 }
 
 
@@ -39,32 +46,27 @@ app.config.from_object(__name__)
 cache = Cache(app, config={'CACHE_TYPE': 'redis'})
 
 def make_celery(app):
-    celery = Celery(app.import_name, backend=app.config['CELERY_BACKEND'],
-                    broker=app.config['CELERY_BROKER_URL'])
-    celery.conf.update(app.config)
-    TaskBase = celery.Task
+	celery = Celery(app.import_name, backend=app.config['CELERY_BACKEND'],
+					broker=app.config['CELERY_BROKER_URL'])
+	celery.conf.update(app.config)
+	TaskBase = celery.Task
 
-    class ContextTask(TaskBase):
-        abstract = True
-        def __call__(self, *args, **kwargs):
-            with app.app_context():
-                return TaskBase.__call__(self, *args, **kwargs)
-    celery.Task = ContextTask
-    return celery
+	class ContextTask(TaskBase):
+		abstract = True
+		def __call__(self, *args, **kwargs):
+			with app.app_context():
+				return TaskBase.__call__(self, *args, **kwargs)
+	celery.Task = ContextTask
+	return celery
 
 
 celery_app = make_celery(app)
 
 
-@celery_app.task(name='return_something')
-def return_something():
-    print ('something')
-    return 'something'
 
 db = SQLAlchemy(app)
 
 CORS(app, resources={r"/*":{'origins':"*"}})
-# CORS(app, resources={r'/*':{'origins': 'http://localhost:8081',"allow_headers": "Access-Control-Allow-Origin"}})
 
 
 ## --------------------------------------------------------------###
@@ -147,7 +149,7 @@ def token_required(f):
 	@wraps(f)
 	def decorated(*args, **kwargs):
 		token = None
-		print("request : ", request)
+		# print("request : ", request)
 		if 'x-access-token' in request.headers:
 			token = request.headers['x-access-token']
 		if not token:
@@ -203,7 +205,6 @@ def login():
 		else:
 			if user.password == post_data.password:
 				token = jwt.encode({'username': user.username, 'useremail': user.user_email, 'lastlogin': user.lastlogin.strftime('%d-%m-%Y %H:%M:%S'),'role':role, 'exp': datetime.utcnow() + timedelta(minutes=30)}, app.config['SECRET_KEY'])
-				print(token)
 				user.lastlogin = datetime.now()
 				db.session.commit()
 				return jsonify({'token': token, 'message': 'success'})
@@ -336,6 +337,7 @@ def get_show_by_venue(current_user):
 			output.append(show_data)
 		return jsonify({'shows' : output})
 	
+## --------------------------------------------------------------###
 
 @app.route('/bookings', methods=['POST'])
 @token_required
@@ -395,6 +397,7 @@ def rate_booking(current_user, bid):
 	else:
 		return jsonify({'message':'failed. login as user'})
 
+## --------------------------------------------------------------###
 
 @app.route('/tickets', methods=['GET'])
 @token_required
@@ -410,6 +413,7 @@ def get_available_tickets(current_user):
 					output[show.show_id] -= booking.booking_tickets
 	return jsonify({'message': 'success', 'available': output})
 			
+
 @cache.cached(timeout=1, key_prefix='gatd')
 def get_available_tickets_dict():
 	output = {}
@@ -491,7 +495,6 @@ def venue_bookings(current_user):
 			booked_tickets += booking.booking_tickets
 		booked_list.append(booked_tickets)
 		booked_percent.append(booked_tickets*100/venue.venue_capacity)
-	print(venue_list, total_list, booked_list, booked_percent)
 	return jsonify({'name_list' : venue_list, 'total_list' : total_list, 'booked_list' : booked_list, 'percent_list': booked_percent})
 
 
@@ -510,14 +513,14 @@ def show_bookings(current_user):
 		for booking in bookings:
 			booked_tickets += booking.booking_tickets
 		booked_list.append(booked_tickets)
-	print(show_list, booked_list)
 	return jsonify({'name_list' : show_list, 'booked_list' : booked_list})
+
+## --------------------------------------------------------------###
 
 @app.route('/get_csv', methods = ['GET'])
 @token_required
 def get_csv(current_user):
 	bookings = Bookings.query.filter_by(booking_userid = current_user.userid).all()
-	# bookings = Bookings.query.filter_by(booking_userid = uid).all()
 	field_names = ["No", "Show Name", "Time", "Tag", "Venue", "Location", "Price", "Tickets", "Rating"]
 	output_list = []
 	count = 0
@@ -542,37 +545,68 @@ def get_csv(current_user):
 		writer.writeheader()
 		writer.writerows(output_list)
 	return send_file('user_bookings.csv', as_attachment=True)
-		
 
+## --------------------------------------------------------------###
+
+		
+@celery_app.task(name='email_remind')
 def email_reminder(recepient):
 	password = "yaajuuhloxuifnbm"
 	username = "21f1007115@ds.study.iitm.ac.in"
-	receiver = ""
+	receiver = recepient
 	msg = MIMEMultipart()
 	msg['From'] = username
 	msg['To'] = recepient
-	msg['Subject'] = "Amazing Events Awaiting only for you."
-	msg.attach(MIMEText("We missed you in bookD. Now Book tickets for your favourite shows and events with 0 platform Fee. Enjoy!"))
-
+	msg['Subject'] = str(datetime.now().strftime("%H:%M:%S")) + " : We missed You."
+	msg.attach(MIMEText("Book your Favourite Shows and Events in bookD now and Enjoy. Thanks."))
+	
 	with smtplib.SMTP('smtp.gmail.com', 587) as server:
 		server.starttls()
 		server.login(username, password)
 		server.sendmail(username, receiver, msg.as_string())
 
-
+@celery_app.task(name='email_report')
 def email_report(recepient):
 	password = "yaajuuhloxuifnbm"
 	username = "21f1007115@ds.study.iitm.ac.in"
-	receiver = "leniko5896@tiuas.com"
+	receiver = recepient
 	msg = MIMEMultipart()
 	msg['From'] = username
 	msg['To'] = recepient
-	msg['Subject'] = "Amazing Events Awaiting only for you."
-	msg.attach(MIMEText("We missed you in bookD. Now Book tickets for your favourite shows and events with 0 platform Fee. Enjoy!"))
+	msg['Subject'] = str(datetime.now().strftime("%H:%M:%S")) + " : Monthly Booking Report - Admin."
+	msg.attach(MIMEText("Master Report of all Bookings made in this Calendar Month is attached below. Thanks."))
 
-	with open(os.path.join(os.getcwd(), 'user_bookings.csv'), 'rb') as f:
+	bookings = Bookings.query.filter_by().all()
+	field_names = ["No", "Show Name", "Time", "Tag", "Venue", "Location", "Price", "Tickets", "Rating"]
+	output_list = []
+	count = 0
+
+	for booking in bookings:
+		if booking.booking_created.month == datetime.now().month:
+			count += 1
+			output_dict = {}
+			output_dict['No'] = count
+			output_dict['Show Name'] = booking.booking_show_name
+			output_dict['Time'] = booking.booking_show_time
+			output_dict['Tag'] = booking.booking_show_tag
+			output_dict['Venue'] = booking.booking_venue_name
+			output_dict['Location'] = booking.booking_venue_location
+			output_dict['Price'] = booking.booking_price
+			output_dict['Tickets'] = booking.booking_tickets
+			output_dict['Rating'] = booking.booking_show_rating
+			output_dict['Time'] = booking.booking_created
+
+			output_list.append(output_dict)
+	
+	with open('master_bookings.csv', 'w') as csvfile:
+		writer = csv.DictWriter(csvfile, fieldnames = field_names)
+		writer.writeheader()
+		writer.writerows(output_list)
+
+
+	with open(os.path.join(os.getcwd(), 'master_bookings.csv'), 'rb') as f:
 		attachment = MIMEApplication(f.read(), _subtype='csv')
-		attachment.add_header('Content-Disposition', 'attachment', filename='user_bookings.csv')
+		attachment.add_header('Content-Disposition', 'attachment', filename='booking_report.csv')
 		msg.attach(attachment)
 	
 	with smtplib.SMTP('smtp.gmail.com', 587) as server:
@@ -580,18 +614,27 @@ def email_report(recepient):
 		server.login(username, password)
 		server.sendmail(username, receiver, msg.as_string())
 
-		
 
+@app.route('/remind', methods = ['GET'])
+@celery_app.task(name='email_remind_schedule')
+def reminder_task():
+	users = Users.query.filter_by().all()
+	for user in users:
+		if (user.user_role == 'user') and (not (user.lastlogin.date() == datetime.now().date())):
+			email_reminder.delay("leniko5896@tiuas.com")
+	return {'message' : 'success'}
 
+@app.route('/report', methods = ['GET'])
+@celery_app.task(name='email_report_schedule')
+def report_task():
+	email_report.delay("leniko5896@tiuas.com")
+	return {'message' : 'success'}
 
-	
-	
 
 
 ## --------------------------------------------------------------###
 
 if __name__ == "__main__":
-	# email_report()
 	# with app.app_context():
 	#     db.create_all()
 	app.run(debug=True)

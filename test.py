@@ -1,3 +1,5 @@
 import datetime
 
-print(datetime.datetime.gmtnow())
+a = datetime.datetime.now()
+print(a.date() == datetime.datetime.now().date())
+print(type(a.date()))
