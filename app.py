@@ -6,7 +6,6 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from datetime import datetime, timedelta
 from functools import wraps
 import jwt
-import pdfkit
 from flask_caching import Cache
 import csv
 from celery import Celery
@@ -22,7 +21,7 @@ import os, time
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secretkennwort'
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///bookd5.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///bookd.db'
 app.config['TESTING'] = True
 
 app.config['CELERY_BACKEND'] = "redis://localhost:6379/"
@@ -33,11 +32,11 @@ app.config['CELERY_TIMEZONE'] = 'Asia/Kolkata'
 app.config['CELERYBEAT_SCHEDULE'] = {
 	'report-every-month': {
 		'task': 'email_report_schedule',
-		'schedule': crontab(minute=37, hour=11, day_of_month='8')
+		'schedule': crontab(minute=00, hour=17, day_of_month='30')
 	},
 	'remind-every-day': {
 		'task': 'email_remind_schedule',
-		'schedule': crontab(minute=37, hour=11)
+		'schedule': crontab(minute=00, hour=17)
 	}
 }
 
@@ -636,5 +635,5 @@ def report_task():
 
 if __name__ == "__main__":
 	# with app.app_context():
-	#     db.create_all()
+	# 	db.create_all()
 	app.run(debug=True)
