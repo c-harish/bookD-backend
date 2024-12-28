@@ -20,7 +20,7 @@ import os, time
 
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'secretkennwort'
+app.config['SECRET_KEY'] = ''
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///bookd.db'
 app.config['TESTING'] = True
 
@@ -550,8 +550,8 @@ def get_csv(current_user):
 		
 @celery_app.task(name='email_remind')
 def email_reminder(recepient):
-	password = "yaajuuhloxuifnbm"
-	username = "21f1007115@ds.study.iitm.ac.in"
+	password = ""
+	username = "@ds.study.iitm.ac.in"
 	receiver = recepient
 	msg = MIMEMultipart()
 	msg['From'] = username
@@ -566,8 +566,8 @@ def email_reminder(recepient):
 
 @celery_app.task(name='email_report')
 def email_report(recepient):
-	password = "yaajuuhloxuifnbm"
-	username = "21f1007115@ds.study.iitm.ac.in"
+	password = ""
+	username = "@ds.study.iitm.ac.in"
 	receiver = recepient
 	msg = MIMEMultipart()
 	msg['From'] = username
